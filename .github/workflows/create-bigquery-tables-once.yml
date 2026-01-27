@@ -118,11 +118,9 @@ jobs:
               c.level1_category_name,
               c.level2_category_name
             FROM `logistics-449115.geography.stg_foursquare_places_kanto` p
-            CROSS JOIN UNNEST(
-              JSON_EXTRACT_ARRAY(p.fsq_category_ids, '$.list')
-            ) AS category_item
+            CROSS JOIN UNNEST(p.fsq_category_ids.list) AS category_item
             LEFT JOIN `logistics-449115.geography.placesCategories` c
-              ON JSON_EXTRACT_SCALAR(category_item, '$.element') = c.category_id
+              ON category_item.element = c.category_id
           )
           
           SELECT 
@@ -194,11 +192,9 @@ jobs:
               c.level1_category_name,
               c.level2_category_name
             FROM `logistics-449115.geography.stg_foursquare_places_kanto` p
-            CROSS JOIN UNNEST(
-              JSON_EXTRACT_ARRAY(p.fsq_category_ids, '$.list')
-            ) AS category_item
+            CROSS JOIN UNNEST(p.fsq_category_ids.list) AS category_item
             LEFT JOIN `logistics-449115.geography.placesCategories` c
-              ON JSON_EXTRACT_SCALAR(category_item, '$.element') = c.category_id
+              ON category_item.element = c.category_id
           )
           
           SELECT 

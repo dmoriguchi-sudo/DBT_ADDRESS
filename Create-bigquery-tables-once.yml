@@ -1,0 +1,438 @@
+name: Create BigQuery Tables (Run Once)
+
+on:
+  workflow_dispatch:  # 手動実行のみ
+
+jobs:
+  create-tables:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install pandas-gbq google-cloud-bigquery
+      
+      - name: Setup credentials
+        run: |
+          echo '${{ secrets.GCP_SA_KEY }}' > /tmp/gcp-key.json
+          export GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcp-key.json
+      
+      - name: Create Tables
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: /tmp/gcp-key.json
+        run: |
+          python3 << 'EOF'
+          from google.cloud import bigquery
+          
+          PROJECT_ID = 'logistics-449115'
+          
+          client = bigquery.Client(project=PROJECT_ID)
+          
+          print("=" * 70)
+          print("BigQueryテーブル作成開始")
+          print("=" * 70)
+          
+          # === 1. stg_foursquare_places_kanto ===
+          print("\n[1/5] stg_foursquare_places_kanto 作成中...")
+          
+          query1 = """
+          CREATE OR REPLACE TABLE `logistics-449115.staging.stg_foursquare_places_kanto` AS
+          
+          WITH base AS (
+            SELECT 
+              fsq_place_id,
+              name,
+              latitude,
+              longitude,
+              geom,
+              address,
+              locality,
+              region,
+              postcode,
+              country,
+              fsq_category_ids,
+              fsq_category_labels
+            FROM `logistics-449115.geography.foursquarePlaces`
+            WHERE country = 'JP'
+          )
+          
+          SELECT 
+            b.*,
+            CASE 
+              WHEN region LIKE '%東京%' OR region LIKE '%Tokyo%' THEN '東京都'
+              WHEN region LIKE '%神奈川%' OR region LIKE '%Kanagawa%' THEN '神奈川県'
+              WHEN region LIKE '%埼玉%' OR region LIKE '%Saitama%' THEN '埼玉県'
+              WHEN region LIKE '%千葉%' OR region LIKE '%Chiba%' THEN '千葉県'
+              WHEN region LIKE '%茨城%' OR region LIKE '%Ibaraki%' THEN '茨城県'
+              WHEN region LIKE '%栃木%' OR region LIKE '%Tochigi%' THEN '栃木県'
+              WHEN region LIKE '%群馬%' OR region LIKE '%Gunma%' THEN '群馬県'
+              ELSE NULL
+            END AS prefecture
+          FROM base b
+          WHERE 
+            latitude BETWEEN 34.0 AND 37.5
+            AND longitude BETWEEN 138.0 AND 141.5
+            AND (
+              region LIKE '%東京%' OR region LIKE '%Tokyo%'
+              OR region LIKE '%神奈川%' OR region LIKE '%Kanagawa%'
+              OR region LIKE '%埼玉%' OR region LIKE '%Saitama%'
+              OR region LIKE '%千葉%' OR region LIKE '%Chiba%'
+              OR region LIKE '%茨城%' OR region LIKE '%Ibaraki%'
+              OR region LIKE '%栃木%' OR region LIKE '%Tochigi%'
+              OR region LIKE '%群馬%' OR region LIKE '%Gunma%'
+            )
+          """
+          
+          job1 = client.query(query1)
+          job1.result()
+          print("✓ 完了")
+          
+          # === 2. stg_competitors_retail ===
+          print("\n[2/5] stg_competitors_retail 作成中...")
+          
+          query2 = """
+          CREATE OR REPLACE TABLE `logistics-449115.staging.stg_competitors_retail` AS
+          
+          WITH places_with_category AS (
+            SELECT 
+              p.fsq_place_id,
+              p.name,
+              p.geom,
+              p.latitude,
+              p.longitude,
+              p.address,
+              p.prefecture,
+              c.category_name,
+              c.level1_category_name,
+              c.level2_category_name
+            FROM `logistics-449115.staging.stg_foursquare_places_kanto` p
+            CROSS JOIN UNNEST(
+              JSON_EXTRACT_ARRAY(p.fsq_category_ids, '$.list')
+            ) AS category_item
+            LEFT JOIN `logistics-449115.geography.placesCategories` c
+              ON JSON_EXTRACT_SCALAR(category_item, '$.element') = c.category_id
+          )
+          
+          SELECT 
+            fsq_place_id,
+            name,
+            geom,
+            latitude,
+            longitude,
+            address,
+            prefecture,
+            category_name,
+            
+            CASE
+              WHEN LOWER(category_name) LIKE '%discount%' THEN 1.0
+              WHEN LOWER(category_name) LIKE '%wholesale%' THEN 1.0
+              WHEN LOWER(category_name) LIKE '%budget%' THEN 1.0
+              WHEN LOWER(category_name) LIKE '%supermarket%' THEN 0.8
+              WHEN LOWER(category_name) LIKE '%grocery%' THEN 0.7
+              WHEN LOWER(category_name) LIKE '%department store%' THEN 0.0
+              WHEN LOWER(category_name) LIKE '%gourmet%' THEN 0.0
+              WHEN LOWER(category_name) LIKE '%specialty%' THEN 0.1
+              WHEN LOWER(category_name) LIKE '%organic%' THEN 0.2
+              ELSE 0.5
+            END AS competition_weight,
+            
+            CASE
+              WHEN LOWER(category_name) LIKE '%discount%' THEN 'ディスカウント'
+              WHEN LOWER(category_name) LIKE '%supermarket%' THEN '一般スーパー'
+              WHEN LOWER(category_name) LIKE '%department store%' THEN 'デパート'
+              WHEN LOWER(category_name) LIKE '%specialty%' THEN '専門店'
+              WHEN LOWER(category_name) LIKE '%gourmet%' THEN '高級食品店'
+              ELSE 'その他小売'
+            END AS retail_type
+          
+          FROM places_with_category
+          WHERE 
+            LOWER(category_name) NOT LIKE '%convenience%'
+            AND (
+              level1_category_name LIKE '%Shop%'
+              OR level1_category_name LIKE '%Food%'
+              OR category_name LIKE '%Market%'
+              OR category_name LIKE '%Store%'
+              OR category_name LIKE '%Grocery%'
+            )
+          """
+          
+          job2 = client.query(query2)
+          job2.result()
+          print("✓ 完了")
+          
+          # === 3. stg_customers_restaurants ===
+          print("\n[3/5] stg_customers_restaurants 作成中...")
+          
+          query3 = """
+          CREATE OR REPLACE TABLE `logistics-449115.staging.stg_customers_restaurants` AS
+          
+          WITH places_with_category AS (
+            SELECT 
+              p.fsq_place_id,
+              p.name,
+              p.geom,
+              p.latitude,
+              p.longitude,
+              p.address,
+              p.locality,
+              p.prefecture,
+              p.postcode,
+              c.category_name,
+              c.level1_category_name,
+              c.level2_category_name
+            FROM `logistics-449115.staging.stg_foursquare_places_kanto` p
+            CROSS JOIN UNNEST(
+              JSON_EXTRACT_ARRAY(p.fsq_category_ids, '$.list')
+            ) AS category_item
+            LEFT JOIN `logistics-449115.geography.placesCategories` c
+              ON JSON_EXTRACT_SCALAR(category_item, '$.element') = c.category_id
+          )
+          
+          SELECT 
+            fsq_place_id,
+            name,
+            geom,
+            latitude,
+            longitude,
+            address,
+            locality,
+            prefecture,
+            postcode,
+            category_name,
+            level1_category_name,
+            level2_category_name,
+            
+            CASE
+              WHEN LOWER(category_name) LIKE '%restaurant%' THEN 'レストラン'
+              WHEN LOWER(category_name) LIKE '%cafe%' OR LOWER(category_name) LIKE '%coffee%' THEN 'カフェ'
+              WHEN LOWER(category_name) LIKE '%bar%' THEN 'バー'
+              WHEN LOWER(category_name) LIKE '%izakaya%' THEN '居酒屋'
+              WHEN LOWER(category_name) LIKE '%ramen%' THEN 'ラーメン'
+              WHEN LOWER(category_name) LIKE '%sushi%' THEN '寿司'
+              ELSE '飲食店その他'
+            END AS restaurant_type
+          
+          FROM places_with_category
+          WHERE 
+            level1_category_name LIKE '%Food%'
+            OR level1_category_name LIKE '%Dining%'
+            OR level1_category_name LIKE '%Restaurant%'
+            OR category_name LIKE '%Restaurant%'
+            OR category_name LIKE '%Cafe%'
+            OR category_name LIKE '%Bar%'
+            OR category_name LIKE '%Izakaya%'
+          """
+          
+          job3 = client.query(query3)
+          job3.result()
+          print("✓ 完了")
+          
+          # === 4. stg_land_prices_kanto ===
+          print("\n[4/5] stg_land_prices_kanto 作成中...")
+          
+          query4 = """
+          CREATE OR REPLACE TABLE `logistics-449115.staging.stg_land_prices_kanto` AS
+          
+          SELECT 
+            city_name,
+            representative_zipcode,
+            prefecture,
+            price_per_sqm,
+            
+            CASE 
+              WHEN price_per_sqm >= 3000000 THEN 100
+              WHEN price_per_sqm >= 1500000 THEN CAST(80 + (price_per_sqm - 1500000) / 1500000 * 19 AS INT64)
+              WHEN price_per_sqm >= 800000 THEN CAST(60 + (price_per_sqm - 800000) / 700000 * 19 AS INT64)
+              WHEN price_per_sqm >= 500000 THEN CAST(40 + (price_per_sqm - 500000) / 300000 * 19 AS INT64)
+              ELSE CAST(20 + (price_per_sqm / 500000) * 19 AS INT64)
+            END AS land_price_score,
+            
+            CASE 
+              WHEN price_per_sqm >= 2500000 THEN '超都心部'
+              WHEN price_per_sqm >= 1200000 THEN '都心部'
+              WHEN price_per_sqm >= 600000 THEN '準都心部'
+              WHEN price_per_sqm >= 300000 THEN '郊外'
+              ELSE '遠郊外'
+            END AS area_classification
+          
+          FROM `logistics-449115.moriguchi.land_prices`
+          WHERE prefecture IN (
+            '東京都', '神奈川県', '埼玉県', '千葉県', 
+            '茨城県', '栃木県', '群馬県'
+          )
+          """
+          
+          job4 = client.query(query4)
+          job4.result()
+          print("✓ 完了")
+          
+          # === 5. mart_restaurant_competition_score ===
+          print("\n[5/5] mart_restaurant_competition_score 作成中...")
+          print("  ⚠ この処理は数分かかります...")
+          
+          query5 = """
+          CREATE OR REPLACE TABLE `logistics-449115.analytics.mart_restaurant_competition_score`
+          PARTITION BY prefecture
+          CLUSTER BY area_classification, risk_level
+          AS
+          
+          WITH restaurant_competition AS (
+            SELECT 
+              r.fsq_place_id AS restaurant_id,
+              r.name AS restaurant_name,
+              r.geom AS restaurant_location,
+              r.latitude,
+              r.longitude,
+              r.address,
+              r.prefecture,
+              r.postcode,
+              r.restaurant_type,
+              
+              SUM(
+                c.competition_weight * 
+                CASE 
+                  WHEN ST_DISTANCE(r.geom, c.geom) <= 100 THEN 2.0
+                  WHEN ST_DISTANCE(r.geom, c.geom) <= 500 THEN 1.5
+                  ELSE 1.0
+                END
+              ) AS base_competition_score,
+              
+              COUNT(CASE WHEN c.retail_type = 'ディスカウント' THEN 1 END) AS discount_count,
+              COUNT(CASE WHEN c.retail_type = '一般スーパー' THEN 1 END) AS supermarket_count,
+              COUNT(CASE WHEN c.retail_type = 'デパート' THEN 1 END) AS department_count,
+              
+              ARRAY_AGG(
+                STRUCT(
+                  c.name,
+                  c.retail_type,
+                  CAST(ST_DISTANCE(r.geom, c.geom) AS INT64) AS distance_m
+                )
+                ORDER BY c.competition_weight DESC, ST_DISTANCE(r.geom, c.geom)
+                LIMIT 3
+              ) AS top_competitors
+              
+            FROM `logistics-449115.staging.stg_customers_restaurants` r
+            LEFT JOIN `logistics-449115.staging.stg_competitors_retail` c
+              ON ST_DWITHIN(r.geom, c.geom, 1000)
+            GROUP BY 
+              r.fsq_place_id, r.name, r.geom, r.latitude, r.longitude,
+              r.address, r.prefecture, r.postcode, r.restaurant_type
+          ),
+          
+          with_land_price AS (
+            SELECT 
+              rc.*,
+              
+              COALESCE(
+                lp_zip.city_name,
+                lp_pref.city_name
+              ) AS matched_city,
+              
+              COALESCE(
+                lp_zip.price_per_sqm,
+                lp_pref.price_per_sqm
+              ) AS land_price_per_sqm,
+              
+              COALESCE(
+                lp_zip.land_price_score,
+                lp_pref.land_price_score,
+                50
+              ) AS land_price_score,
+              
+              COALESCE(
+                lp_zip.area_classification,
+                lp_pref.area_classification,
+                '不明'
+              ) AS area_classification
+              
+            FROM restaurant_competition rc
+            
+            LEFT JOIN `logistics-449115.staging.stg_land_prices_kanto` lp_zip
+              ON rc.postcode = lp_zip.representative_zipcode
+            
+            LEFT JOIN (
+              SELECT 
+                prefecture,
+                '' AS city_name,
+                AVG(price_per_sqm) AS price_per_sqm,
+                CAST(AVG(land_price_score) AS INT64) AS land_price_score,
+                APPROX_TOP_COUNT(area_classification, 1)[OFFSET(0)].value AS area_classification
+              FROM `logistics-449115.staging.stg_land_prices_kanto`
+              GROUP BY prefecture
+            ) lp_pref
+              ON rc.prefecture = lp_pref.prefecture
+          ),
+          
+          final_scoring AS (
+            SELECT 
+              *,
+              1 - (land_price_score / 100.0 * 0.6) AS price_adjustment_factor,
+              base_competition_score * (1 - (land_price_score / 100.0 * 0.6)) AS adjusted_competition_score
+            FROM with_land_price
+          )
+          
+          SELECT 
+            restaurant_id,
+            restaurant_name,
+            restaurant_location,
+            latitude,
+            longitude,
+            address,
+            prefecture,
+            postcode,
+            restaurant_type,
+            matched_city,
+            land_price_per_sqm,
+            land_price_score,
+            area_classification,
+            base_competition_score,
+            adjusted_competition_score,
+            discount_count,
+            supermarket_count,
+            department_count,
+            top_competitors,
+            
+            CASE 
+              WHEN area_classification IN ('超都心部', '都心部') 
+                AND adjusted_competition_score < 2.0 
+                THEN '低リスク'
+              WHEN area_classification IN ('郊外', '遠郊外')
+                AND discount_count >= 2 
+                THEN '高リスク'
+              WHEN adjusted_competition_score >= 4.0 THEN '高リスク'
+              WHEN adjusted_competition_score >= 2.0 THEN '中リスク'
+              ELSE '低リスク'
+            END AS risk_level
+            
+          FROM final_scoring
+          """
+          
+          job5 = client.query(query5)
+          job5.result()
+          print("✓ 完了")
+          
+          print("\n" + "=" * 70)
+          print("全テーブル作成完了！")
+          print("=" * 70)
+          
+          # 行数確認
+          for table in [
+            'logistics-449115.staging.stg_foursquare_places_kanto',
+            'logistics-449115.staging.stg_competitors_retail',
+            'logistics-449115.staging.stg_customers_restaurants',
+            'logistics-449115.staging.stg_land_prices_kanto',
+            'logistics-449115.analytics.mart_restaurant_competition_score'
+          ]:
+            table_obj = client.get_table(table)
+            print(f"{table}: {table_obj.num_rows:,}行")
+          
+          EOF

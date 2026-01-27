@@ -40,11 +40,15 @@ jobs:
           print("BigQueryテーブル作成開始")
           print("=" * 70)
           
+          print("\n既存データセットを使用:")
+          print("  - geography (staging層)")
+          print("  - analytics (mart層)")
+          
           # === 1. stg_foursquare_places_kanto ===
           print("\n[1/5] stg_foursquare_places_kanto 作成中...")
           
           query1 = """
-          CREATE OR REPLACE TABLE `logistics-449115.staging.stg_foursquare_places_kanto` AS
+          CREATE OR REPLACE TABLE `logistics-449115.geography.stg_foursquare_places_kanto` AS
           
           WITH base AS (
             SELECT 
@@ -99,7 +103,7 @@ jobs:
           print("\n[2/5] stg_competitors_retail 作成中...")
           
           query2 = """
-          CREATE OR REPLACE TABLE `logistics-449115.staging.stg_competitors_retail` AS
+          CREATE OR REPLACE TABLE `logistics-449115.geography.stg_competitors_retail` AS
           
           WITH places_with_category AS (
             SELECT 
@@ -113,7 +117,7 @@ jobs:
               c.category_name,
               c.level1_category_name,
               c.level2_category_name
-            FROM `logistics-449115.staging.stg_foursquare_places_kanto` p
+            FROM `logistics-449115.geography.stg_foursquare_places_kanto` p
             CROSS JOIN UNNEST(
               JSON_EXTRACT_ARRAY(p.fsq_category_ids, '$.list')
             ) AS category_item
@@ -173,7 +177,7 @@ jobs:
           print("\n[3/5] stg_customers_restaurants 作成中...")
           
           query3 = """
-          CREATE OR REPLACE TABLE `logistics-449115.staging.stg_customers_restaurants` AS
+          CREATE OR REPLACE TABLE `logistics-449115.geography.stg_customers_restaurants` AS
           
           WITH places_with_category AS (
             SELECT 
@@ -189,7 +193,7 @@ jobs:
               c.category_name,
               c.level1_category_name,
               c.level2_category_name
-            FROM `logistics-449115.staging.stg_foursquare_places_kanto` p
+            FROM `logistics-449115.geography.stg_foursquare_places_kanto` p
             CROSS JOIN UNNEST(
               JSON_EXTRACT_ARRAY(p.fsq_category_ids, '$.list')
             ) AS category_item
@@ -240,7 +244,7 @@ jobs:
           print("\n[4/5] stg_land_prices_kanto 作成中...")
           
           query4 = """
-          CREATE OR REPLACE TABLE `logistics-449115.staging.stg_land_prices_kanto` AS
+          CREATE OR REPLACE TABLE `logistics-449115.geography.stg_land_prices_kanto` AS
           
           SELECT 
             city_name,
@@ -280,7 +284,7 @@ jobs:
           print("  ⚠ この処理は数分かかります...")
           
           query5 = """
-          CREATE OR REPLACE TABLE `logistics-449115.analytics.mart_restaurant_competition_score`
+          CREATE OR REPLACE TABLE `logistics-449115.geography.mart_restaurant_competition_score`
           PARTITION BY prefecture
           CLUSTER BY area_classification, risk_level
           AS
@@ -320,8 +324,8 @@ jobs:
                 LIMIT 3
               ) AS top_competitors
               
-            FROM `logistics-449115.staging.stg_customers_restaurants` r
-            LEFT JOIN `logistics-449115.staging.stg_competitors_retail` c
+            FROM `logistics-449115.geography.stg_customers_restaurants` r
+            LEFT JOIN `logistics-449115.geography.stg_competitors_retail` c
               ON ST_DWITHIN(r.geom, c.geom, 1000)
             GROUP BY 
               r.fsq_place_id, r.name, r.geom, r.latitude, r.longitude,
@@ -356,7 +360,7 @@ jobs:
               
             FROM restaurant_competition rc
             
-            LEFT JOIN `logistics-449115.staging.stg_land_prices_kanto` lp_zip
+            LEFT JOIN `logistics-449115.geography.stg_land_prices_kanto` lp_zip
               ON rc.postcode = lp_zip.representative_zipcode
             
             LEFT JOIN (
@@ -366,7 +370,7 @@ jobs:
                 AVG(price_per_sqm) AS price_per_sqm,
                 CAST(AVG(land_price_score) AS INT64) AS land_price_score,
                 APPROX_TOP_COUNT(area_classification, 1)[OFFSET(0)].value AS area_classification
-              FROM `logistics-449115.staging.stg_land_prices_kanto`
+              FROM `logistics-449115.geography.stg_land_prices_kanto`
               GROUP BY prefecture
             ) lp_pref
               ON rc.prefecture = lp_pref.prefecture
@@ -426,11 +430,11 @@ jobs:
           
           # 行数確認
           for table in [
-            'logistics-449115.staging.stg_foursquare_places_kanto',
-            'logistics-449115.staging.stg_competitors_retail',
-            'logistics-449115.staging.stg_customers_restaurants',
-            'logistics-449115.staging.stg_land_prices_kanto',
-            'logistics-449115.analytics.mart_restaurant_competition_score'
+            'logistics-449115.geography.stg_foursquare_places_kanto',
+            'logistics-449115.geography.stg_competitors_retail',
+            'logistics-449115.geography.stg_customers_restaurants',
+            'logistics-449115.geography.stg_land_prices_kanto',
+            'logistics-449115.geography.mart_restaurant_competition_score'
           ]:
             table_obj = client.get_table(table)
             print(f"{table}: {table_obj.num_rows:,}行")
